@@ -14,6 +14,7 @@ func main() {
 	naive := flag.Bool("naive", false, "AIMDを使わず固定レートで送り続ける（比較用）")
 	fixedRate := flag.Float64("fixed-rate", 15.0, "-naive 使用時の固定リクエストレート")
 	ticks := flag.Int("ticks", 40, "実行する秒数")
+	target := flag.String("target", "http://localhost:8082/", "呼び出し先URL（デフォルトはMiddle経由。Leafに直接投げるなら http://localhost:8081/ を指定）")
 	flag.Parse()
 
 	rate := 1.0
@@ -45,7 +46,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				resp, err := client.Get("http://localhost:8081/")
+				resp, err := client.Get(*target)
 				if err != nil {
 					mu.Lock()
 					failCount++
