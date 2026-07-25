@@ -8,8 +8,15 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"gonum.org/v1/plot"
+	"gonum.org/v1/plot/plotter"
+	"gonum.org/v1/plot/plotutil"
+	"gonum.org/v1/plot/vg"
 )
 
+// protocolVersion は、このバックプレッシャー伝播プロトコル自体のバージョン。
+// メッセージフォーマット（X-Loadの意味・AIMDの挙動）を変更したら上げる。
 func main() {
 	naive := flag.Bool("naive", false, "AIMDを使わず固定レートで送り続ける（比較用）")
 	fixedRate := flag.Float64("fixed-rate", 15.0, "-naive 使用時の固定リクエストレート")
@@ -24,6 +31,13 @@ func main() {
 
 	fmt.Println("mode:", modeLabel(*naive))
 	fmt.Println("time_s\trate\tavg_load\tok\tfail")
+
+	// --- 各tickの値を溜めておくスライス（グラフ描画用） ---
+	times := make([]float64, *ticks)
+	rates := make([]float64, *ticks)
+	avgLoads := make([]float64, *ticks)
+	okCounts := make([]float64, *ticks)
+	failCounts := make([]float64, *ticks)
 
 	for tick := 0; tick < *ticks; tick++ {
 		sendRate := rate
@@ -94,7 +108,23 @@ func main() {
 
 		fmt.Printf("%d\t%.1f\t%.2f\t%d\t%d\n", tick, sendRate, avgLoad, okCount, failCount)
 
+		// --- この tick の値を記録（グラフ描画用） ---
+		times[tick] = float64(tick)
+		rates[tick] = sendRate
+		avgLoads[tick] = avgLoad
+		okCounts[tick] = float64(okCount)
+		failCounts[tick] = float64(failCount)
+
 		time.Sleep(1 * time.Second)
+	}
+
+	// --- 設定内容をファイル名に組み込む ---
+	filename := buildFilename(*naive, *fixedRate)
+
+	if err := outputGraph(times, rates, avgLoads, okCounts, failCounts, filename); err != nil {
+		fmt.Println("failed to output graph:", err)
+	} else {
+		fmt.Println("graph saved to:", filename)
 	}
 }
 
@@ -103,4 +133,47 @@ func modeLabel(naive bool) string {
 		return "naive (fixed rate, no backpressure)"
 	}
 	return "AIMD (backpressure-aware)"
+}
+
+// buildFilename は、実行時の設定（AIMDか固定か、固定ならそのレート）と
+// プロトコルバージョンを組み込んだファイル名を組み立てる。
+// 例: request_rate_aimd_v1.png / request_rate_naive_rate20_v1.png
+func buildFilename(naive bool, fixedRate float64) string {
+	mode := "aimd"
+	if naive {
+		mode = fmt.Sprintf("naive_rate%.0f", fixedRate)
+	}
+	return fmt.Sprintf("request_rate_%s.png", mode)
+}
+
+// outputGraph は time_s を横軸に、rate / avg_load / ok / fail の
+// 4項目を1つの折れ線グラフとして filename に書き出す。
+func outputGraph(times, rates, avgLoads, okCounts, failCounts []float64, filename string) error {
+	p := plot.New()
+
+	p.Title.Text = "Backpressure Demo: Metrics Over Time"
+	p.X.Label.Text = "Time (s)"
+	p.Y.Label.Text = "Value"
+
+	// []float64 を plotter.XYs（X,Yの点列）に変換するヘルパー
+	toXYs := func(ys []float64) plotter.XYs {
+		pts := make(plotter.XYs, len(times))
+		for i := range times {
+			pts[i].X = times[i]
+			pts[i].Y = ys[i]
+		}
+		return pts
+	}
+
+	err := plotutil.AddLinePoints(p,
+		"Rate", toXYs(rates),
+		"AvgLoad", toXYs(avgLoads),
+		"OK", toXYs(okCounts),
+		"Fail", toXYs(failCounts),
+	)
+	if err != nil {
+		return err
+	}
+
+	return p.Save(8*vg.Inch, 4*vg.Inch, filename)
 }
