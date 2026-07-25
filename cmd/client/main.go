@@ -24,7 +24,7 @@ func main() {
 	target := flag.String("target", "http://localhost:8082/", "呼び出し先URL（デフォルトはMiddle経由。Leafに直接投げるなら http://localhost:8081/ を指定）")
 	flag.Parse()
 
-	rate := 1.0
+	rate := 3.0
 	const minRate = 1.0
 
 	client := &http.Client{Timeout: 2 * time.Second}
