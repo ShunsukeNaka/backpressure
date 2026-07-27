@@ -15,8 +15,6 @@ import (
 	"gonum.org/v1/plot/vg"
 )
 
-// protocolVersion は、このバックプレッシャー伝播プロトコル自体のバージョン。
-// メッセージフォーマット（X-Loadの意味・AIMDの挙動）を変更したら上げる。
 func main() {
 	naive := flag.Bool("naive", false, "AIMDを使わず固定レートで送り続ける（比較用）")
 	fixedRate := flag.Float64("fixed-rate", 15.0, "-naive 使用時の固定リクエストレート")
@@ -24,7 +22,7 @@ func main() {
 	target := flag.String("target", "http://localhost:8082/", "呼び出し先URL（デフォルトはMiddle経由。Leafに直接投げるなら http://localhost:8081/ を指定）")
 	flag.Parse()
 
-	rate := 3.0
+	rate := 5.0
 	const minRate = 1.0
 
 	client := &http.Client{Timeout: 2 * time.Second}
