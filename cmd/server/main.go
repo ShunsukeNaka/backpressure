@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 // capacity は同時に処理できるリクエスト数の上限（これを超えると過負荷とみなす）
 const capacity = 5
+
 //処理中の件数を保持する変数
 var current int32
 
@@ -40,7 +42,26 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
+// backgroundLoad は、テストクライアントとは無関係に発生する「他のサービスからの
+// トラフィック」を模擬する。到着間隔・処理時間の両方にランダム性を持たせることで、
+// 現実のように予測不能な負荷変動を作り出す。
+func backgroundLoad(rate float64) {
+	for {
+		// ポアソン過程に近い到着間隔（指数分布）
+		interval := time.Duration(rand.ExpFloat64() / rate * float64(time.Second))
+		time.Sleep(interval)
+
+		go func() {
+			atomic.AddInt32(&current, 1)
+			defer atomic.AddInt32(&current, -1)
+			// 処理時間にもばらつきを持たせる（軽い処理〜重い処理が混在）
+			time.Sleep(time.Duration(20+rand.Intn(300)) * time.Millisecond)
+		}()
+	}
+}
+
 func main() {
+	go backgroundLoad(2.0) // 2 requests per second
 	http.HandleFunc("/", handler)
 	log.Println("server listening on :8081 (capacity =", capacity, ")")
 	log.Fatal(http.ListenAndServe(":8081", nil))
