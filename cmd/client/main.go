@@ -5,14 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
-	"gonum.org/v1/plot"
-	"gonum.org/v1/plot/plotter"
-	"gonum.org/v1/plot/plotutil"
-	"gonum.org/v1/plot/vg"
+	"backpressure-demo/internal/metrics"
 )
 
 func main() {
@@ -20,6 +18,7 @@ func main() {
 	fixedRate := flag.Float64("fixed-rate", 15.0, "-naive 使用時の固定リクエストレート")
 	ticks := flag.Int("ticks", 40, "実行する秒数")
 	target := flag.String("target", "http://localhost:8082/", "呼び出し先URL（デフォルトはMiddle経由。Leafに直接投げるなら http://localhost:8081/ を指定）")
+	leafStats := flag.String("leaf-stats", "http://localhost:8081/stats", "Leafの背景負荷を取得するstatsエンドポイント")
 	flag.Parse()
 
 	rate := 5.0
@@ -28,14 +27,10 @@ func main() {
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	fmt.Println("mode:", modeLabel(*naive))
-	fmt.Println("time_s\trate\tavg_load\tok\tfail")
+	fmt.Println("time_s\trate\tavg_load\tbg_load\tok\tfail")
 
-	// --- 各tickの値を溜めておくスライス（グラフ描画用） ---
-	times := make([]float64, *ticks)
-	rates := make([]float64, *ticks)
-	avgLoads := make([]float64, *ticks)
-	okCounts := make([]float64, *ticks)
-	failCounts := make([]float64, *ticks)
+	// --- 計測結果を溜めておくスライス（CSV出力用） ---
+	records := make([]metrics.Record, 0, *ticks)
 
 	for tick := 0; tick < *ticks; tick++ {
 		sendRate := rate
@@ -91,6 +86,9 @@ func main() {
 			avgLoad = loadSum / float64(loadCount)
 		}
 
+		// --- 背景負荷の取得（可視化用。AIMDの判断には使わない） ---
+		bgLoad := fetchBackgroundLoad(client, *leafStats)
+
 		// --- ここが分散バックプレッシャー伝播のコア ---
 		if !*naive {
 			switch {
@@ -104,26 +102,38 @@ func main() {
 			}
 		}
 
-		fmt.Printf("%d\t%.1f\t%.2f\t%d\t%d\n", tick, sendRate, avgLoad, okCount, failCount)
+		fmt.Printf("%d\t%.1f\t%.2f\t%.0f\t%d\t%d\n", tick, sendRate, avgLoad, bgLoad, okCount, failCount)
 
-		// --- この tick の値を記録（グラフ描画用） ---
-		times[tick] = float64(tick)
-		rates[tick] = sendRate
-		avgLoads[tick] = avgLoad
-		okCounts[tick] = float64(okCount)
-		failCounts[tick] = float64(failCount)
+		// --- この tick の計測結果を記録（CSV出力用） ---
+		records = append(records, metrics.Record{
+			TimeS:   float64(tick),
+			Rate:    sendRate,
+			AvgLoad: avgLoad,
+			BgLoad:  bgLoad,
+			OK:      float64(okCount),
+			Fail:    float64(failCount),
+		})
 
 		time.Sleep(1 * time.Second)
 	}
 
-	// --- 設定内容をファイル名に組み込む ---
+	// --- 設定内容をファイル名に組み込んでCSVに書き出す ---
 	filename := buildFilename(*naive, *fixedRate)
 
-	if err := outputGraph(times, rates, avgLoads, okCounts, failCounts, filename); err != nil {
-		fmt.Println("failed to output graph:", err)
-	} else {
-		fmt.Println("graph saved to:", filename)
+	f, err := os.Create(filename)
+	if err != nil {
+		fmt.Println("failed to create csv:", err)
+		return
 	}
+	defer f.Close()
+
+	if err := metrics.WriteCSV(f, records); err != nil {
+		fmt.Println("failed to write csv:", err)
+		return
+	}
+
+	fmt.Println("csv saved to:", filename)
+	fmt.Println("visualize with: go run ./cmd/visualize -in=" + filename)
 }
 
 func modeLabel(naive bool) string {
@@ -133,45 +143,35 @@ func modeLabel(naive bool) string {
 	return "AIMD (backpressure-aware)"
 }
 
-// buildFilename は、実行時の設定（AIMDか固定か、固定ならそのレート）と
-// プロトコルバージョンを組み込んだファイル名を組み立てる。
-// 例: request_rate_aimd_v1.png / request_rate_naive_rate20_v1.png
+// fetchBackgroundLoad は Leaf の /stats エンドポイントを叩いて、
+// 現在の背景負荷の同時実行数を取得する。取得に失敗したら 0 を返す
+// （可視化用の補助情報であり、AIMDの判断には影響させないため）。
+func fetchBackgroundLoad(client *http.Client, url string) float64 {
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0
+	}
+
+	v, err := strconv.ParseFloat(string(body), 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// buildFilename は、実行時の設定（AIMDか固定か、固定ならそのレート）を
+// 組み込んだCSVファイル名を組み立てる。
+// 例: request_rate_aimd.csv / request_rate_naive_rate20.csv
 func buildFilename(naive bool, fixedRate float64) string {
 	mode := "aimd"
 	if naive {
 		mode = fmt.Sprintf("naive_rate%.0f", fixedRate)
 	}
-	return fmt.Sprintf("request_rate_%s.png", mode)
-}
-
-// outputGraph は time_s を横軸に、rate / avg_load / ok / fail の
-// 4項目を1つの折れ線グラフとして filename に書き出す。
-func outputGraph(times, rates, avgLoads, okCounts, failCounts []float64, filename string) error {
-	p := plot.New()
-
-	p.Title.Text = "Backpressure Demo: Metrics Over Time"
-	p.X.Label.Text = "Time (s)"
-	p.Y.Label.Text = "Value"
-
-	// []float64 を plotter.XYs（X,Yの点列）に変換するヘルパー
-	toXYs := func(ys []float64) plotter.XYs {
-		pts := make(plotter.XYs, len(times))
-		for i := range times {
-			pts[i].X = times[i]
-			pts[i].Y = ys[i]
-		}
-		return pts
-	}
-
-	err := plotutil.AddLinePoints(p,
-		"Rate", toXYs(rates),
-		"AvgLoad", toXYs(avgLoads),
-		"OK", toXYs(okCounts),
-		"Fail", toXYs(failCounts),
-	)
-	if err != nil {
-		return err
-	}
-
-	return p.Save(8*vg.Inch, 4*vg.Inch, filename)
+	return fmt.Sprintf("request_rate_%s.csv", mode)
 }
