@@ -46,7 +46,35 @@ Middleサービスのhandlerは、リクエストを受けるたびに:
 これにより、Middle自身が全く混んでいなくても、Leafが混んでいれば
 その情報がそのまま上流（Client）まで伝わります。
 
-## 実行方法
+## Makefileでの実行（推奨）
+
+3プロセスを手動で起動する代わりに、`make demo`で一括実行できます。
+
+```bash
+make demo              # Leaf/Middleをバックグラウンド起動 → AIMDモードで計測 → グラフ生成まで自動
+make demo-naive        # 同上、naiveモード（比較用、デフォルト fixed-rate=15）
+make demo-naive FIXED_RATE=20   # naiveモードのレートを変える場合
+```
+
+`make demo`はLeaf/Middleを裏で起動したまま計測・可視化までを1コマンドで行い、
+終了時（正常終了・Ctrl+Cどちらでも）にLeaf/Middleのプロセスを自動で停止します。
+
+個別に動かしたい場合は、これまで通り3ターミナルに分けて実行することもできます。
+
+```bash
+make run-server     # ターミナル1
+make run-middle     # ターミナル2
+make run-client     # ターミナル3（AIMDモード）
+# または
+make run-client-naive FIXED_RATE=20
+
+make visualize IN=request_rate_aimd.csv
+```
+
+その他: `make build`（全体ビルド確認）、`make tidy`（`go mod tidy`）、
+`make clean`（生成された`*.csv`/`*.png`を削除）。`make help`で一覧を表示します。
+
+## 実行方法（Makeを使わない場合）
 
 ターミナルを3つ開いて、この順番で起動します。
 
