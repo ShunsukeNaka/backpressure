@@ -1,13 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"strconv"
-	"sync/atomic"
 	"time"
+
+	"backpressure-demo/pkg/backpressure"
 )
 
 // capacity は大きめにしてある: このサービス自身はほぼ過負荷にならないようにするため
@@ -16,19 +15,16 @@ const capacity = 50
 
 const downstreamURL = "http://localhost:8081/"
 
-var current int32
+var tracker = backpressure.NewLoadTracker(capacity)
 
 var downstreamClient = &http.Client{Timeout: 2 * time.Second}
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	atomic.AddInt32(&current, 1)
-	defer atomic.AddInt32(&current, -1)
+	done := tracker.Begin()
+	defer done()
 
-	// 1. 自分自身の負荷を計算する（Leafサービスと同じロジック）
-	ownLoad := float64(atomic.LoadInt32(&current)) / float64(capacity)
-	if ownLoad > 1.0 {
-		ownLoad = 1.0
-	}
+	// 1. 自分自身の負荷を計算する（コアライブラリに委譲）
+	ownLoad := tracker.Load()
 
 	// 2. 下流（Leafサービス）を呼び出し、その負荷を受け取る
 	downstreamLoad := 0.0
@@ -43,7 +39,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		defer resp.Body.Close()
 		io.Copy(io.Discard, resp.Body)
 
-		if v, parseErr := strconv.ParseFloat(resp.Header.Get("X-Load"), 64); parseErr == nil {
+		if v, parseErr := backpressure.ParseLoad(resp); parseErr == nil {
 			downstreamLoad = v
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -51,16 +47,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// --- ここがバックプレッシャー伝播のコア ---
+	// --- ここがバックプレッシャー伝播のコア（コアライブラリのMergeに委譲） ---
 	// 自分の負荷と下流の負荷のうち、大きい方を「実質的な負荷」として上流に伝える。
 	// こうすることで、下流のどこか1段でも過負荷になれば、その情報が
 	// このサービスを経由してさらに上流（Client側）まで伝わっていく。
-	mergedLoad := ownLoad
-	if downstreamLoad > mergedLoad {
-		mergedLoad = downstreamLoad
-	}
+	mergedLoad := backpressure.Merge(ownLoad, downstreamLoad)
 
-	w.Header().Set("X-Load", fmt.Sprintf("%.2f", mergedLoad))
+	w.Header().Set(backpressure.HeaderName, backpressure.FormatLoad(mergedLoad))
 
 	if !downstreamOK || mergedLoad >= 1.0 {
 		w.WriteHeader(http.StatusServiceUnavailable)

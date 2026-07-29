@@ -46,7 +46,35 @@ Middleサービスのhandlerは、リクエストを受けるたびに:
 これにより、Middle自身が全く混んでいなくても、Leafが混んでいれば
 その情報がそのまま上流（Client）まで伝わります。
 
-## 実行方法
+## Makefileでの実行（推奨）
+
+3プロセスを手動で起動する代わりに、`make demo`で一括実行できます。
+
+```bash
+make demo              # Leaf/Middleをバックグラウンド起動 → AIMDモードで計測 → グラフ生成まで自動
+make demo-naive        # 同上、naiveモード（比較用、デフォルト fixed-rate=15）
+make demo-naive FIXED_RATE=20   # naiveモードのレートを変える場合
+```
+
+`make demo`はLeaf/Middleを裏で起動したまま計測・可視化までを1コマンドで行い、
+終了時（正常終了・Ctrl+Cどちらでも）にLeaf/Middleのプロセスを自動で停止します。
+
+個別に動かしたい場合は、これまで通り3ターミナルに分けて実行することもできます。
+
+```bash
+make run-server     # ターミナル1
+make run-middle     # ターミナル2
+make run-client     # ターミナル3（AIMDモード）
+# または
+make run-client-naive FIXED_RATE=20
+
+make visualize IN=request_rate_aimd.csv
+```
+
+その他: `make build`（全体ビルド確認）、`make tidy`（`go mod tidy`）、
+`make clean`（生成された`*.csv`/`*.png`を削除）。`make help`で一覧を表示します。
+
+## 実行方法（Makeを使わない場合）
 
 ターミナルを3つ開いて、この順番で起動します。
 
@@ -102,10 +130,63 @@ go run ./cmd/client -naive -fixed-rate=15
 
 `fail`（503やタイムアウト）の数が AIMD ありのケースより明らかに増えるはずです。
 
-## 次にやれること
+## コアライブラリ（pkg/backpressure）
 
-- 3段目（Middle2）を追加して、Client → Middle1 → Middle2 → Leaf の3ホップにする
-- 伝播にTTL（あと何ホップ伝播できるか）を持たせ、無限伝播を防ぐ
-- 伝播頻度自体をスロットリングして、伝播コストが新たな負荷にならないようにする
-- `X-Load` を単一指標ではなく複数指標にしてみる
-- 自己申告(`ownLoad`)と実測(レイテンシ)の突合による信頼度チェックを入れる
+プロトコルのロジック（負荷計算、X-Loadヘッダーの読み書き、マージ、AIMD調整）は
+`pkg/backpressure` という1つのGoパッケージに切り出してあります。これは他のプロジェクトが
+importして使うことを想定した、本当の意味での配布用ライブラリです。
+
+```go
+import "backpressure-demo/pkg/backpressure"
+
+// サーバー側: 負荷を計算してヘッダーに乗せる
+tracker := backpressure.NewLoadTracker(capacity)
+done := tracker.Begin()
+defer done()
+tracker.FormatHeader(w) // X-Load ヘッダーをセット
+
+// 中間サービス側: 自分の負荷と下流の負荷をマージする
+merged := backpressure.Merge(ownLoad, downstreamLoad)
+
+// クライアント側: AIMDでレートを自動調整する
+ctrl := backpressure.NewAIMDController(1.0)
+newRate := ctrl.Update(avgLoad)
+```
+
+## デモアプリケーションと計測・可視化の分離
+
+`cmd/server`, `cmd/middle`, `cmd/client`, `cmd/visualize` は、いずれも
+`pkg/backpressure` の使い方を示すための**デモアプリケーション**であり、
+それ自体は配布用ライブラリではありません。
+
+このうち「計測（cmd/client）」と「可視化（cmd/visualize）」は、責務を分けて
+別コマンドにしてあります。
+
+```bash
+go run ./cmd/client                        # 計測してCSVに出力するだけ
+go run ./cmd/visualize -in=request_rate_aimd.csv  # CSVを読んでPNGにするだけ
+```
+
+計測と可視化を分けている理由:
+
+- 生データ（CSV）が手元に残るので、後からグラフのスタイルを変えたり、
+  複数回の実行結果を比較したりが自由にできる
+- `gonum/plot`（可視化ライブラリ）への依存を`cmd/visualize`だけに閉じ込められる
+- 将来、可視化をGo以外（Python/matplotlibなど）に置き換えたくなっても、
+  CSVを読ませるだけで済む
+
+CSVの読み書きスキーマ（列の定義）は、`cmd/client`と`cmd/visualize`の両方から
+参照される `internal/metrics` にまとめています。`internal/` に置いているのは、
+これがこのモジュールの外から使われることを想定していない、デモ専用の
+共有コードだからです（`pkg/backpressure`とは意図的に区別しています）。
+
+## ディレクトリ構成
+
+```
+pkg/backpressure/     プロトコルのコアロジック（配布用ライブラリ）
+internal/metrics/     CSVスキーマの共有コード（デモ専用、モジュール外からは使えない）
+cmd/server/            デモ: Leafサービス
+cmd/middle/            デモ: Middleサービス
+cmd/client/            デモ: 計測してCSVに出力するクライアント
+cmd/visualize/         デモ: CSVを読んでPNGにする可視化ツール
+```
