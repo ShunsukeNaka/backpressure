@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"backpressure-demo/internal/metrics"
+	"backpressure-demo/pkg/backpressure"
 )
 
 func main() {
@@ -21,8 +22,8 @@ func main() {
 	leafStats := flag.String("leaf-stats", "http://localhost:8081/stats", "Leafの背景負荷を取得するstatsエンドポイント")
 	flag.Parse()
 
-	rate := 5.0
-	const minRate = 1.0
+	// レート調整の判断ロジックは pkg/backpressure の AIMDController に委譲する。
+	ctrl := backpressure.NewAIMDController(5.0)
 
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -33,7 +34,7 @@ func main() {
 	records := make([]metrics.Record, 0, *ticks)
 
 	for tick := 0; tick < *ticks; tick++ {
-		sendRate := rate
+		sendRate := ctrl.Rate
 		if *naive {
 			sendRate = *fixedRate
 		}
@@ -63,8 +64,7 @@ func main() {
 				defer resp.Body.Close()
 				io.Copy(io.Discard, resp.Body)
 
-				loadStr := resp.Header.Get("X-Load")
-				load, parseErr := strconv.ParseFloat(loadStr, 64)
+				load, parseErr := backpressure.ParseLoad(resp)
 
 				mu.Lock()
 				if resp.StatusCode == http.StatusOK {
@@ -91,15 +91,7 @@ func main() {
 
 		// --- ここが分散バックプレッシャー伝播のコア ---
 		if !*naive {
-			switch {
-			case avgLoad > 0.8:
-				rate = rate * 0.5 // Multiplicative Decrease
-				if rate < minRate {
-					rate = minRate
-				}
-			case avgLoad < 0.3:
-				rate = rate + 1 // Additive Increase
-			}
+			ctrl.Update(avgLoad)
 		}
 
 		fmt.Printf("%d\t%.1f\t%.2f\t%.0f\t%d\t%d\n", tick, sendRate, avgLoad, bgLoad, okCount, failCount)
