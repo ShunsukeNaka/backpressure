@@ -1,1 +1,45 @@
-*.png
+# --- Go関連 ---
+# ビルド成果物・バイナリ
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# go build ./... で生成される、パッケージ名と同名のバイナリ対策
+/server
+/client
+/middle
+/visualize
+
+# テストバイナリ (go test -c で生成される)
+*.test
+
+# go tool cover の出力
+*.out
+
+# go.work（複数モジュールを跨ぐ作業時に生成される。個人環境依存のため除外）
+go.work
+go.work.sum
+
+# --- このプロジェク独自の生成物 ---
+# cmd/client が出力する計測結果CSV
+request_rate_*.csv
+
+# cmd/visualize が出力するグラフPNG
+request_rate_*.png
+
+# --- OS・エディタ関連 ---
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# JetBrains系 (GoLand等)
+.idea/
+
+# vim
+*.swp
+*.swo

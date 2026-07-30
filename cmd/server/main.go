@@ -7,13 +7,16 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"backpressure-demo/pkg/backpressure"
 )
 
 // capacity は同時に処理できるリクエスト数の上限（これを超えると過負荷とみなす）
 const capacity = 5
 
-//処理中の件数を保持する変数（実リクエスト + 背景負荷の合計）
-var current int32
+//処理中の件数を保持する変数（実リクエスト + 背景負荷の合計）。
+// 負荷の計算そのものは pkg/backpressure の LoadTracker に委譲する。
+var tracker = backpressure.NewLoadTracker(capacity)
 
 // bgCurrent は、backgroundLoad が生成している「背景負荷」だけの
 // 同時実行数を保持する変数。current とは別に持つことで、
@@ -21,14 +24,11 @@ var current int32
 var bgCurrent int32
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	atomic.AddInt32(&current, 1) // 複数のリクエストが同時に操作を行ってもこの操作は絶対に他の処理と衝突しないことを保証してカウントを増やす
-	defer atomic.AddInt32(&current, -1)
+	done := tracker.Begin() // 複数のリクエストが同時に操作を行ってもこの操作は絶対に他の処理と衝突しないことを保証してカウントを増やす（内部でatomicを使用）
+	defer done()
 
-	// 負荷率の計算
-	load := float64(atomic.LoadInt32(&current)) / float64(capacity)
-	if load > 1.0 {
-		load = 1.0
-	}
+	// 負荷率の計算（LoadTrackerに委譲）
+	load := tracker.Load()
 
 	// 負荷が高いほど処理が遅くなる（実際のサービスに近い挙動をシミュレート）
 	baseMs := 20.0
@@ -36,7 +36,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(time.Duration(baseMs*slowdown) * time.Millisecond)
 
 	// これが本デモの核: 現在の負荷を1つの数値として返すだけ
-	w.Header().Set("X-Load", fmt.Sprintf("%.2f", load))
+	tracker.FormatHeader(w)
 
 	if load >= 1.0 {
 		w.WriteHeader(http.StatusServiceUnavailable) // 503
@@ -64,9 +64,9 @@ func backgroundLoad(rate float64) {
 		time.Sleep(interval)
 
 		go func() {
-			atomic.AddInt32(&current, 1)
+			done := tracker.Begin()
 			atomic.AddInt32(&bgCurrent, 1)
-			defer atomic.AddInt32(&current, -1)
+			defer done()
 			defer atomic.AddInt32(&bgCurrent, -1)
 			// 処理時間にもばらつきを持たせる（軽い処理〜重い処理が混在）
 			time.Sleep(time.Duration(20+rand.Intn(300)) * time.Millisecond)
